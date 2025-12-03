@@ -1,0 +1,30 @@
+# Ambientes Virtuais Python
+.venv/
+env/
+venv/
+ENV/
+
+# Azure Functions
+local.settings.json
+.funcignore
+.azure-functions/
+.python_packages/
+__pycache__/
+*.py[cod]
+
+# VS Code
+.vscode/
+
+# Logs e Temporários
+*.log
+*.tmp
+.DS_Store
+
+# Arquivos de Teste/Coverage
+.pytest_cache/
+htmlcov/
+coverage.xml
+run_pipeline_azure.ps1
+# Se houver banco de dados local (SQLite, etc)
+*.sqlite3
+*.db

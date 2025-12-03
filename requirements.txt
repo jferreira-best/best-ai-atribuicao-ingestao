@@ -1,0 +1,8 @@
+azure-functions
+azure-search-documents
+azure-storage-blob
+azure-core
+requests
+pypdf
+python-docx
+python-dotenv
