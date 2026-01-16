@@ -11,19 +11,20 @@ $ErrorActionPreference = "Stop"
 # ==========================================
 
 # --- [Atenção] Preencha seus dados do Azure Storage aqui ---
-$StorageAccountName = "SUA_CHAVE_AQUI"
-$StorageAccountKey  = "SUA_CHAVE_AQUI"
+$StorageAccountName = "seedcrmbasedadosbot"
+$StorageAccountKey  = "xx"
 $ContainerName      = "atribuicao"   # <-- Seu container existente
 $BlobPrefix         = ""             # Deixe vazio "" se os arquivos estiverem na raiz do container
 
 # --- Configurações do Azure AI Search (Indexação) ---
-$SearchEndpoint   = "SUA_CHAVE_AQUI" 
-$SearchKey        = "SUA_CHAVE_AQUI"
-$SearchIndex      = "kb-atribuicao1"
+$SearchEndpoint   = "https://see-h-ai-crm-searchbot.search.windows.net" 
+$SearchKey        = "xx"
+$SearchIndex      = "kb-atribuicao"
 
+# --- Configurações do Azure OpenAI (Embeddings) ---
 
-$AoaiEndpoint ="SUA_CHAVE_AQUI"
-$AoaiKey ="SUA_CHAVE_AQUI"
+$AoaiEndpoint ="https://seducouvidoriacrm-dev.openai.azure.com"
+$AoaiKey ="xx"
 
 
 
@@ -54,6 +55,7 @@ if (Test-Path "./requirements.txt") {
 Write-Host "`n>>> [2/3] Processando arquivos do container '$ContainerName'..." -ForegroundColor Cyan
 
 # Monta os argumentos. Note que NÃO usamos --input-dir, forçando o script a ir no Azure.
+
 $prepArgs = @(
     "make_kb_jsonl_atribuicao.py",
     "--account-name", $StorageAccountName,
@@ -61,8 +63,10 @@ $prepArgs = @(
     "--container", $ContainerName,
     "--output-jsonl", $OutputJsonl,
     "--assunto", "Legislação Educacional",
-    "--area-interesse", "Recursos Humanos"
+    "--area-interesse", "Recursos Humanos",
+    "--upload-jsonl", "jsonl/kb_atribuicao.jsonl"
 )
+
 
 # Adiciona prefixo apenas se houver (para evitar erro de argumento vazio)
 if (-not [string]::IsNullOrWhiteSpace($BlobPrefix)) {
@@ -96,7 +100,8 @@ $ingestArgs = @(
     "--aoai-key", $AoaiKey,
     "--aoai-emb-deployment", $AoaiEmbModel,
     "--aoai-api-version", $AoaiApiVersion,
-    "--emb-dim", "$EmbDim"
+    "--emb-dim", "$EmbDim",
+    "--search-api-version", "2023-11-01"  # <--- ESSA LINHA É A CHAVE DA CORREÇÃO
 )
 
 python @ingestArgs

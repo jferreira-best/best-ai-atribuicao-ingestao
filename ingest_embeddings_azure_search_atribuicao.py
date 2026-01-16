@@ -11,7 +11,7 @@ Novidades em relação ao script anterior:
   referencias_legais (Collection(Edm.String)).
 - Campo 'conhecimento' mantido como filterable/facetable.
 - analyzerName="pt.Microsoft" em 'text' e 'doc_title' para melhorar a busca lexical em pt-BR.
-- semantic.configurations ("kb-semantic") priorizando doc_title, text e campos-chave.
+- semantic.configurations ("kb-atribuicao-semantic") priorizando doc_title, text e campos-chave.
 """
 
 import os
@@ -84,9 +84,9 @@ def ensure_index(search_endpoint: str, search_key: str, index_name: str, emb_dim
         "fields": [
             {"name": "id", "type": "Edm.String", "key": True, "searchable": False},
 
-            # Conteúdo e embedding
-            #{"name": "text", "type": "Edm.String", "searchable": True, "analyzer": "pt.Microsoft"},
-            {"name": "text", "type": "Edm.String", "searchable": True},
+            # CORREÇÃO AQUI: Mudamos de 'pt.Microsoft' para 'pt-BR.microsoft'
+            {"name": "text", "type": "Edm.String", "searchable": True, "analyzer": "pt-BR.microsoft"},
+            
             {
                 "name": "content_vector",
                 "type": "Collection(Edm.Single)",
@@ -97,8 +97,10 @@ def ensure_index(search_endpoint: str, search_key: str, index_name: str, emb_dim
 
             # Estrutura básica
             {"name": "chunk", "type": "Edm.Int32", "filterable": True, "searchable": False},
-            #{"name": "doc_title", "type": "Edm.String", "searchable": True, "analyzer": "pt.Microsoft"},
-            {"name": "doc_title", "type": "Edm.String", "searchable": True},
+            
+            # CORREÇÃO AQUI TAMBÉM:
+            {"name": "doc_title", "type": "Edm.String", "searchable": True, "analyzer": "pt-BR.microsoft"},
+            
             {"name": "source_file", "type": "Edm.String", "filterable": True, "searchable": False},
             {"name": "assunto", "type": "Edm.String", "filterable": True, "facetable": True, "searchable": False},
             {"name": "area_interesse", "type": "Edm.String", "filterable": True, "facetable": True, "searchable": False},
@@ -137,7 +139,7 @@ def ensure_index(search_endpoint: str, search_key: str, index_name: str, emb_dim
         # Semantic Ranker (API 2023-11-01 usa PRIORITIZED* em vez de content/keywords)
         "semantic": {
             "configurations": [{
-                "name": "kb-semantic",
+                "name": "kb-atribuicao-semantic",
                 "prioritizedFields": {
                     "titleField": {"fieldName": "doc_title"},
                     "prioritizedContentFields": [
@@ -281,8 +283,7 @@ def main():
     ap.add_argument("--search-endpoint", required=True)
     ap.add_argument("--search-api-key", required=True)
     ap.add_argument("--search-index", required=True)
-    #ap.add_argument("--search-api-version", default=os.getenv("SEARCH_API_VERSION", "2024-07-01-Preview"))
-    ap.add_argument("--search-api-version", default=os.getenv("SEARCH_API_VERSION", "2024-07-01"))
+    ap.add_argument("--search-api-version", default=os.getenv("SEARCH_API_VERSION", "2023-11-01"))
 
     args = ap.parse_args()
 

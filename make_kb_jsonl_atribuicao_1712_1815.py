@@ -5,13 +5,26 @@
 Gera um JSONL (chunks) a partir de arquivos locais ou de um container do Azure Blob,
 incluindo metadados úteis para busca semântica/filtros no Azure AI Search.
 
-SOLUÇÃO ATUALIZADA:
-- Usa 'pymupdf4llm' para converter PDF em Markdown (Preserva Tabelas).
-- Usa heurísticas para converter tabelas de DOCX em Markdown.
-- Mantém todas as heurísticas de metadados do script original.
+Atualizado para suportar os cenários:
+- AC  : Atribuição de Classes
+- AD  : Avaliação de Desempenho
+- CP  : Confirmação de Participação
+- PEI : Programa Ensino Integral
 
-Dependências extras:
-  pip install pymupdf4llm
+Exemplos:
+  # Somente local
+  python make_kb_jsonl_atribuicao.py \
+    --input-dir ./docs \
+    --output-jsonl kb_seduc.jsonl \
+    --assunto seduc --area-interesse conhecimento
+
+  # Blob (baixa arquivos e sobe o JSONL de volta)
+  python make_kb_jsonl_atribuicao.py \
+    --container obras --prefix docs/ \
+    --output-jsonl kb_seduc.jsonl \
+    --upload-jsonl jsonl/kb_seduc.jsonl \
+    --assunto seduc --area-interesse conhecimento \
+    --account-name <STORAGE_ACCOUNT> --account-key <STORAGE_KEY>
 """
 
 import os
@@ -41,15 +54,14 @@ try:
 except Exception:
     pass
 
-# ====== PDF (PyMuPDF4LLM) ======
-# Essencial para ler tabelas corretamente em Markdown
-pymupdf4llm = None
+# ====== PDF / DOCX (opcionais) ======
+PdfReader = None
 try:
-    import pymupdf4llm
-except ImportError:
+    from PyPDF2 import PdfReader as _PdfReader
+    PdfReader = _PdfReader
+except Exception:
     pass
 
-# ====== DOCX ======
 docx = None
 try:
     import docx as _docx
@@ -61,12 +73,8 @@ except Exception:
 # ==============================
 # Utilidades de chunking/IO
 # ==============================
-def chunk_text(text: str, target_chars: int = 1500, overlap: int = 200) -> Iterable[str]:
-    """
-    Chunking otimizado para Markdown.
-    Aumentamos o target_chars padrão para não quebrar tabelas grandes.
-    Tenta não cortar no meio de uma linha de tabela ('|').
-    """
+def chunk_text(text: str, target_chars: int = 1200, overlap: int = 150) -> Iterable[str]:
+    """Chunking simples por tamanho-alvo com overlap."""
     text = (text or "").strip()
     if not text:
         return []
@@ -77,29 +85,15 @@ def chunk_text(text: str, target_chars: int = 1500, overlap: int = 200) -> Itera
         return [text]
     if overlap < 0:
         overlap = 0
-    
     while i < N:
         j = min(N, i + target_chars)
-        
-        # Lógica para evitar quebrar tabelas markdown (| col | col |) no meio da linha
-        if j < N:
-            # Pega o próximo caractere de quebra de linha
-            next_newline = text.find('\n', j)
-            # Se a quebra de linha estiver perto (até 150 chars), esticamos o chunk
-            if next_newline != -1 and (next_newline - j) < 150:
-                j = next_newline + 1
-        
         chunk = text[i:j]
         chunks.append(chunk.strip())
-        
         if j >= N:
             break
-            
-        # Recuo para overlap
         i = j - overlap if overlap > 0 else j
         if i < 0:
             i = 0
-            
     return [c for c in chunks if c]
 
 
@@ -114,61 +108,45 @@ def read_txt(path: Path) -> str:
 
 
 def read_pdf(path: Path) -> str:
-    """
-    Usa PyMuPDF4LLM para converter PDF em Markdown.
-    Isso preserva a estrutura de TABELAS.
-    """
-    if pymupdf4llm is None:
-        print(f"[erro] 'pymupdf4llm' não instalado. O script vai falhar ao ler tabelas. Instale: pip install pymupdf4llm")
+    if PdfReader is None:
+        print(f"[warn] PyPDF2 não instalado; ignorando PDF: {path.name}")
         return ""
     try:
-        # A mágica acontece aqui: PDF -> Markdown com tabelas
-        md_text = pymupdf4llm.to_markdown(str(path))
-        return md_text
+        with open(path, "rb") as f:
+            pdf = PdfReader(f)
+            parts = []
+            for page in pdf.pages:
+                txt = (page.extract_text() or "").strip()
+                if txt:
+                    parts.append(txt)
+            return "\n".join(parts)
     except Exception as e:
-        print(f"[warn] Falha ao ler PDF {path.name} com PyMuPDF: {e}")
+        print(f"[warn] Falha ao ler PDF {path.name}: {e}")
         return ""
 
 
 def read_docx(path: Path) -> str:
-    """
-    Lê DOCX tentando preservar tabelas em formato Markdown simples.
-    """
     if docx is None:
         print(f"[warn] python-docx não instalado; ignorando DOCX: {path.name}")
         return ""
     try:
         d = docx.Document(str(path))
-        full_text = []
-
-        # Itera sobre elementos na ordem (parágrafos e tabelas)
-        # Nota: python-docx não facilita iterar na ordem exata de aparição body.elements facilmente sem hacks.
-        # Vamos usar uma abordagem simplificada: Texto primeiro, depois tabelas (ou apenas iterar parágrafos se tabelas forem complexas).
-        # Abordagem robusta simples: Iterar parágrafos. Tabelas no python-docx ficam separadas.
-        # Para RAG simples, vamos extrair texto e depois tabelas ao final ou tentar intercalar se possível.
-        
-        # Opção 1: Extração linear de texto (parágrafos)
+        parts = []
         for p in d.paragraphs:
             t = (p.text or "").strip()
             if t:
-                full_text.append(t)
-        
-        # Opção 2: Extração de tabelas convertendo para Markdown
-        if d.tables:
-            full_text.append("\n\n--- TABELAS DO DOCUMENTO ---\n")
-            for tbl in d.tables:
-                rows_md = []
-                for row in tbl.rows:
-                    cells = [(cell.text or "").strip().replace("\n", " ") for cell in row.cells]
-                    # Formato Markdown: | celula | celula |
-                    if any(cells):
-                        rows_md.append("| " + " | ".join(cells) + " |")
-                
-                if rows_md:
-                    full_text.append("\n".join(rows_md))
-                    full_text.append("\n")
-
-        return "\n".join(full_text)
+                parts.append(t)
+        # opcional: tabelas
+        for tbl in getattr(d, "tables", []):
+            for row in getattr(tbl, "rows", []):
+                row_cells = []
+                for cell in getattr(row, "cells", []):
+                    ct = (cell.text or "").strip()
+                    if ct:
+                        row_cells.append(ct)
+                if row_cells:
+                    parts.append(" | ".join(row_cells))
+        return "\n".join(parts)
     except Exception as e:
         print(f"[warn] Falha ao ler DOCX {path.name}: {e}")
         return ""
@@ -179,30 +157,46 @@ def extract_text_from_file(path: Path) -> str:
     if suffix in (".txt", ".md", ".csv", ".log"):
         return read_txt(path)
     if suffix == ".pdf":
-        return read_pdf(path) # Agora usa Markdown (pymupdf4llm)
+        return read_pdf(path)
     if suffix == ".docx":
         return read_docx(path)
+    # fallback: tenta como texto
     return read_txt(path)
 
 
 # ==============================
 # Heurísticas de metadados
 # ==============================
-YEAR_RE = re.compile(r"\b(20[2-4]\d)\b")
-DATE_BR_RE = re.compile(r"\b([0-3]?\d)[/.-]([01]?\d)[/.-](20[2-4]\d)\b")
+YEAR_RE = re.compile(r"\b(20[2-4]\d)\b")  # 2020–2049 (ajuste se quiser)
+DATE_BR_RE = re.compile(r"\b([0-3]?\d)[/.-]([01]?\d)[/.-](20[2-4]\d)\b")  # dd/mm/yyyy ou dd.mm.yyyy
 
 def infer_conhecimento(file_name: str) -> str:
+    """
+    Define a área de conhecimento baseada no prefixo ou palavras-chave do arquivo.
+    Suporta: AC, AD, CP, PEI.
+    """
     fn = (file_name or "").strip().upper()
-    if fn.startswith("AT"): return "Atribuição de Classes (AC)"
-    if fn.startswith("AC"): return "Atribuição de Classes (AC)"
-    if fn.startswith("AD"): return "Avaliação de Desempenho (AD)"
-    if fn.startswith("CP"): return "Confirmação de Participação (CP)"
-    if fn.startswith("PEI"): return "Programa Ensino Integral (PEI)"
     
-    if "ATRIBUI" in fn: return "Atribuição de Classes (AC)"
-    if "AVALIACA" in fn or "DESEMPENHO" in fn: return "Avaliação de Desempenho (AD)"
-    if "CONFIRMACAO" in fn and "PARTICIPACAO" in fn: return "Confirmação de Participação (CP)"
-    if "ENSINO INTEGRAL" in fn: return "Programa Ensino Integral (PEI)"
+    # Mapeamento direto de prefixos
+    if fn.startswith("AC"):
+        return "Atribuição de Classes (AC)"
+    if fn.startswith("AD"):
+        return "Avaliação de Desempenho (AD)"
+    if fn.startswith("CP"):
+        return "Confirmação de Participação (CP)"
+    if fn.startswith("PEI"):
+        return "Programa Ensino Integral (PEI)"
+    
+    # Fallback: tentar detectar no meio do nome se não houver prefixo claro
+    if "ATRIBUI" in fn: 
+        return "Atribuição de Classes (AC)"
+    if "AVALIACA" in fn or "DESEMPENHO" in fn: 
+        return "Avaliação de Desempenho (AD)"
+    if "CONFIRMACAO" in fn and "PARTICIPACAO" in fn:
+        return "Confirmação de Participação (CP)"
+    if "ENSINO INTEGRAL" in fn:
+        return "Programa Ensino Integral (PEI)"
+        
     return "Geral"
 
 def norm_str(s: Optional[str]) -> str:
@@ -228,17 +222,22 @@ def guess_norma_tipo(text: str, fname: str) -> str:
 
 def guess_orgao_emissor(text: str) -> str:
     s = (text or "").upper()
+    # Prioridade para combinações
     if "SUCOR" in s and "SUPED" in s: return "SUCOR/SUPED"
     if "CGRH" in s: return "CGRH"
     for k in ("DIPES", "SUCOR", "SUPED", "SEDUC"):
-        if k in s: return k
+        if k in s:
+            return k
     return ""
 
 def guess_ano_letivo(text: str, fname: str) -> str:
+    # prioridade: número que aparece no nome (ex.: 2026)
     ys = re.findall(YEAR_RE, fname or "")
     if ys: return ys[0]
+    # senão, do conteúdo (pega o maior ano encontrado, assumindo ser o ano letivo alvo)
     ys = re.findall(YEAR_RE, text or "")
     if ys:
+        # converter para int, pegar o max, voltar para str
         try:
             return str(max(map(int, ys)))
         except:
@@ -246,57 +245,101 @@ def guess_ano_letivo(text: str, fname: str) -> str:
     return ""
 
 def guess_fase_processo(text: str, fname: str) -> str:
+    """
+    Tenta identificar a fase do processo (ex: Inscrição, Alocação, Credenciamento).
+    """
     s = f"{fname}\n{text}"
     s_low = s.lower()
-    if "conferência de dados" in s_low or "conferencia de dados" in s_low: return "Conferência de Dados"
-    if "credenciamento" in s_low: return "Credenciamento"
+    
+    # 1. Termos específicos de PEI e CP
+    if "conferência de dados" in s_low or "conferencia de dados" in s_low:
+        return "Conferência de Dados"
+    
+    if "credenciamento" in s_low:
+        return "Credenciamento"
+        
     if "alocação" in s_low or "alocacao" in s_low:
-        if "inicial" in s_low: return "Alocação Inicial"
+        if "inicial" in s_low:
+            return "Alocação Inicial"
         return "Alocação"
-    if "realocação" in s_low or "realocacao" in s_low: return "Realocação"
+
+    if "realocação" in s_low or "realocacao" in s_low:
+        return "Realocação"
+
     if "transferência" in s_low or "transferencia" in s_low:
-        if "pei" in s_low: return "Transferência PEI"
+        if "pei" in s_low:
+            return "Transferência PEI"
         return "Transferência"
+
+    # 2. Confirmação de Participação com fases
     if "confirmação de participação" in s_low or "confirmacao de participacao" in s_low:
         m = re.search(r"fase\s*(\d+)", s_low)
-        if m: return f"Confirmação de Participação – Fase {m.group(1)}"
+        if m:
+            return f"Confirmação de Participação – Fase {m.group(1)}"
         return "Confirmação de Participação"
-    if "classificação" in s_low or "classificacao" in s_low: return "Classificação"
-    if "inscrição" in s_low or "inscricao" in s_low: return "Inscrição"
+        
+    # 3. Classificação e Inscrição
+    if "classificação" in s_low or "classificacao" in s_low:
+        return "Classificação"
+        
+    if "inscrição" in s_low or "inscricao" in s_low:
+        return "Inscrição"
+
+    # 4. Avaliação de Desempenho
     if "avaliação de desempenho" in s_low or "avaliacao de desempenho" in s_low:
-        if "final" in s_low: return "Avaliação de Desempenho Final"
-        if "parcial" in s_low: return "Avaliação de Desempenho Parcial"
+        if "final" in s_low:
+            return "Avaliação de Desempenho Final"
+        if "parcial" in s_low:
+            return "Avaliação de Desempenho Parcial"
         return "Avaliação de Desempenho"
+
     return ""
 
 def guess_programa(text: str) -> str:
     s = (text or "").lower()
-    if "programa ensino integral" in s or " pei " in s or "no pei" in s: return "PEI"
-    if "ensino integral" in s: return "PEI"
-    if "tempo parcial" in s: return "Tempo Parcial"
-    if "eja" in s: return "EJA"
-    if "ensino técnico" in s or "novotec" in s: return "Ensino Técnico / Novotec"
+    # Prioridade alta para PEI
+    if "programa ensino integral" in s or " pei " in s or "no pei" in s:
+        return "PEI"
+    if "ensino integral" in s:
+        return "PEI"
+        
+    if "tempo parcial" in s:
+        return "Tempo Parcial"
+    if "eja" in s:
+        return "EJA"
+    if "ensino técnico" in s or "novotec" in s:
+        return "Ensino Técnico / Novotec"
+        
     return ""
 
 def guess_publico_alvo(text: str) -> str:
     s = (text or "").lower()
     targets = []
-    if "docente" in s or "professor" in s: targets.append("Docentes")
-    if "diretor" in s or "gestor" in s or "coordenador" in s: targets.append("Gestores")
-    if "candidato" in s or "contratado" in s: targets.append("Candidatos/Contratados")
+    if "docente" in s or "professor" in s:
+        targets.append("Docentes")
+    if "diretor" in s or "gestor" in s or "coordenador" in s:
+        targets.append("Gestores")
+    if "candidato" in s or "contratado" in s:
+        targets.append("Candidatos/Contratados")
+    
     if not targets:
         if "pei" in s: return "PEI"
         return "Geral"
+        
     return ", ".join(sorted(list(set(targets))))
 
 def guess_prazos(text: str) -> Tuple[str, str]:
+    # procura pares de datas próximas no texto (ex.: "de 13/10 a 31/10/2025")
+    # 1) janela “de dd/mm a dd/mm[/yyyy]”
     m = re.search(r"de\s+([0-3]?\d/[01]?\d)(?:/(\d{4}))?\s+a\s+([0-3]?\d/[01]?\d)(?:/(\d{4}))?", text, flags=re.I)
     if m:
         d1, y1, d2, y2 = m.group(1), m.group(2), m.group(3), m.group(4)
+        # injeta ano se estiver faltando (tenta achar em volta)
         year_hint = y1 or y2
         if not year_hint:
             around = re.findall(YEAR_RE, text)
             year_hint = around[0] if around else ""
+        # quebra dd/mm
         try:
             d1d, d1m = d1.split("/")
             d2d, d2m = d2.split("/")
@@ -305,45 +348,38 @@ def guess_prazos(text: str) -> Tuple[str, str]:
             return ini, fim
         except Exception:
             pass
+    # 2) fallback: primeira e segunda data explícitas dd/mm/yyyy
     ds = re.findall(DATE_BR_RE, text)
     if len(ds) >= 2:
         (d1, m1, y1), (d2, m2, y2) = ds[0], ds[1]
         return to_iso_date(d1, m1, y1), to_iso_date(d2, m2, y2)
     return "", ""
 
-#dicionário de meses
-MESES = {
-    "janeiro": "01", "fevereiro": "02", "março": "03", "abril": "04", "maio": "05", "junho": "06",
-    "julho": "07", "agosto": "08", "setembro": "09", "outubro": "10", "novembro": "11", "dezembro": "12"
-}
-
 def guess_data_publicacao(text: str) -> str:
-    # Tenta numérico primeiro
+    # heurística simples: procura primeira data dd/mm/yyyy; se encontrar, devolve
     m = re.search(DATE_BR_RE, text)
     if m:
         return to_iso_date(m.group(1), m.group(2), m.group(3))
-    
-    # Tenta extenso: "13 de Janeiro de 2026"
-    m_ext = re.search(r"(\d{1,2})\s+de\s+([a-zç]+)\s+de\s+(20\d{2})", text, flags=re.IGNORECASE)
-    if m_ext:
-        dia, mes_nome, ano = m_ext.groups()
-        mes_num = MESES.get(mes_nome.lower())
-        if mes_num:
-            return f"{ano}-{mes_num}-{int(dia):02d}"
-            
     return ""
 
 def extract_referencias_legais(text: str) -> List[str]:
     refs = set()
+    # Resolução SEDUC nº 132/2025; Resolução SE nº 83/2025 ...
     for m in re.finditer(r"(Resolu\w+.*?)\b(\d{1,4})\/(20[1-4]\d)", text, flags=re.I):
         chunk = m.group(0).strip()
-        if 6 <= len(chunk) <= 140: refs.add(chunk)
+        if 6 <= len(chunk) <= 140:
+            refs.add(chunk)
+    # Portaria nº XXXX/AAAA
     for m in re.finditer(r"(Portaria.*?)\b(\d{1,4})\/(20[1-4]\d)", text, flags=re.I):
         chunk = m.group(0).strip()
-        if 6 <= len(chunk) <= 140: refs.add(chunk)
+        if 6 <= len(chunk) <= 140:
+            refs.add(chunk)
+    # Lei Complementar
     for m in re.finditer(r"(Lei Complementar.*?)\b(\d{1,4})\/(20\d{2}|19\d{2})", text, flags=re.I):
         chunk = m.group(0).strip()
-        if 6 <= len(chunk) <= 140: refs.add(chunk)
+        if 6 <= len(chunk) <= 140:
+            refs.add(chunk)
+            
     return sorted(refs)
 
 
@@ -352,7 +388,7 @@ def extract_referencias_legais(text: str) -> List[str]:
 # ==============================
 def list_blob_paths(account_name: str, account_key: str, container: str, prefix: Optional[str]) -> List[str]:
     if BlobServiceClient is None or AzureNamedKeyCredential is None:
-        raise RuntimeError("azure-storage-blob não está instalado.")
+        raise RuntimeError("azure-storage-blob não está instalado. Instale para listar/baixar do Blob.")
     cred = AzureNamedKeyCredential(account_name, account_key)
     bsc = BlobServiceClient(account_url=f"https://{account_name}.blob.core.windows.net", credential=cred)
     cc = bsc.get_container_client(container)
@@ -367,7 +403,7 @@ def list_blob_paths(account_name: str, account_key: str, container: str, prefix:
 
 def download_blob_dir(tmp_dir: Path, account_name: str, account_key: str, container: str, prefix: Optional[str]) -> Path:
     if BlobServiceClient is None or AzureNamedKeyCredential is None:
-        raise RuntimeError("azure-storage-blob não está instalado.")
+        raise RuntimeError("azure-storage-blob não está instalado. Instale para baixar do Blob.")
     cred = AzureNamedKeyCredential(account_name, account_key)
     bsc = BlobServiceClient(account_url=f"https://{account_name}.blob.core.windows.net", credential=cred)
     cc = bsc.get_container_client(container)
@@ -392,7 +428,7 @@ def download_blob_dir(tmp_dir: Path, account_name: str, account_key: str, contai
 
 def upload_jsonl(account_name: str, account_key: str, container: str, blob_path: str, local_jsonl: Path):
     if BlobServiceClient is None or AzureNamedKeyCredential is None:
-        raise RuntimeError("azure-storage-blob não está instalado.")
+        raise RuntimeError("azure-storage-blob não está instalado. Instale para enviar ao Blob.")
     cred = AzureNamedKeyCredential(account_name, account_key)
     bsc = BlobServiceClient(account_url=f"https://{account_name}.blob.core.windows.net", credential=cred)
     cc = bsc.get_container_client(container)
@@ -413,16 +449,16 @@ def main():
     ap.add_argument("--area-interesse", default=os.getenv("AREA_INTERESSE", "conhecimento"),
                     help="Campo 'area_interesse' a gravar no JSONL.")
 
-    # Azure Blob
+    # Azure Blob (opcional)
     ap.add_argument("--account-name", help="Storage Account Name (se usar Blob).")
     ap.add_argument("--account-key", help="Storage Account Key (se usar Blob).")
     ap.add_argument("--container", help="Container do Azure Blob (ex.: obras).")
     ap.add_argument("--prefix", help="Prefixo dentro do container (ex.: docs/).")
-    ap.add_argument("--upload-jsonl", help="Se informado, faz upload do JSONL para este caminho no container.")
+    ap.add_argument("--upload-jsonl", help="Se informado, faz upload do JSONL para este caminho no container (ex.: jsonl/kb.jsonl).")
 
     # Chunking
-    ap.add_argument("--target-chars", type=int, default=int(os.getenv("TARGET_CHARS", "1500")))
-    ap.add_argument("--overlap", type=int, default=int(os.getenv("OVERLAP", "200")))
+    ap.add_argument("--target-chars", type=int, default=int(os.getenv("TARGET_CHARS", "1200")))
+    ap.add_argument("--overlap", type=int, default=int(os.getenv("OVERLAP", "150")))
 
     args = ap.parse_args()
 
@@ -435,17 +471,18 @@ def main():
             if not work_dir.exists():
                 raise RuntimeError(f"Diretório não existe: {work_dir}")
         else:
+            # tenta baixar do blob, se container informado
             if args.container and args.account_name and args.account_key:
                 work_dir = download_blob_dir(tmp_root, args.account_name, args.account_key, args.container, args.prefix)
             else:
                 raise RuntimeError("Informe --input-dir OU (--container + --account-name + --account-key) para baixar do Blob.")
 
+        # varrer arquivos (mantido do original)
         files = [p for p in work_dir.rglob("*") if p.is_file() and p.suffix.lower() in (".pdf", ".docx", ".txt", ".md", ".csv", ".log")]
         files.sort(key=lambda x: x.name.lower())
 
         records: List[dict] = []
         for f in files:
-            print(f"[info] Processando: {f.name}")
             text = extract_text_from_file(f)
             if not text.strip():
                 continue
@@ -453,8 +490,10 @@ def main():
             doc_title = f.stem
             is_gloss = bool(re.search(r"gloss[aá]rio", f.name, flags=re.I))
 
-            # metadados heurísticos
+            # conhecimento por prefixo e nome
             conhecimento = infer_conhecimento(f.name)
+
+            # ------- Metadados enriquecidos (lógica aprimorada) -------
             norma_tipo = guess_norma_tipo(text, f.name)
             orgao_emissor = guess_orgao_emissor(text)
             data_publicacao = guess_data_publicacao(text)
@@ -464,6 +503,7 @@ def main():
             publico_alvo = guess_publico_alvo(text)
             prazo_inicio, prazo_fim = guess_prazos(text)
             referencias_legais = extract_referencias_legais(text)
+            # -------------------------------------
 
             for idx, chunk in enumerate(chunk_text(text, target_chars=args.target_chars, overlap=args.overlap), start=1):
                 rec: Dict[str, object] = {
@@ -475,12 +515,14 @@ def main():
                     "assunto": args.assunto,
                     "area_interesse": args.area_interesse,
                     "conhecimento": conhecimento,
-                    
+
+                    # campos de busca/semântica
                     "content": chunk,
                     "text": chunk,
                     "is_glossario": is_gloss,
                     "chunk": idx,
 
+                    # metadados adicionais (filtros/facetas)
                     "norma_tipo": norma_tipo,
                     "orgao_emissor": orgao_emissor,
                     "data_publicacao": data_publicacao,
@@ -502,6 +544,7 @@ def main():
 
         print(f"[ok] JSONL gerado: {out} (chunks: {len(records)})")
 
+        # Upload opcional
         if args.upload_jsonl:
             if not (args.container and args.account_name and args.account_key):
                 raise RuntimeError("Para --upload-jsonl é necessário informar --container, --account-name e --account-key.")
@@ -513,6 +556,7 @@ def main():
             shutil.rmtree(tmp_root, ignore_errors=True)
 
     print("[done] Processo concluído.")
+
 
 if __name__ == "__main__":
     main()

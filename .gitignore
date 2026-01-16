@@ -3,6 +3,7 @@
 env/
 venv/
 ENV/
+.env
 
 # Azure Functions
 local.settings.json
@@ -21,6 +22,8 @@ __pycache__/
 .DS_Store
 
 # Arquivos de Teste/Coverage
+test_index_dev.py
+test_index_prod.py
 .pytest_cache/
 htmlcov/
 coverage.xml
