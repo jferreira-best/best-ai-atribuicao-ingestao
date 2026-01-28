@@ -31,3 +31,12 @@ run_pipeline_azure.ps1
 # Se houver banco de dados local (SQLite, etc)
 *.sqlite3
 *.db
+.env
+.env.*
+secrets.*
+
+
+.env
+.env.*
+secrets.*
+

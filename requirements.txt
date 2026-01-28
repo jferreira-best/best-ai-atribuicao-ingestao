@@ -6,3 +6,9 @@ requests
 pypdf
 python-docx
 python-dotenv
+azure-data-tables
+# Bibliotecas para PDF e OCR Local
+pymupdf4llm
+pymupdf
+rapidocr-onnxruntime
+onnxruntime
